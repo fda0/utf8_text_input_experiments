@@ -1,5 +1,4 @@
 
-
 struct String
 {
     u8 *str;
@@ -99,6 +98,22 @@ static b32 is_whitespace(u32 c)
 #define Bitmask_14 0x00003fff
 #define Bitmask_15 0x00007fff
 #define Bitmask_16 0x0000ffff
+
+#define Bitmask_17 0x0001ffff
+#define Bitmask_18 0x0003ffff
+#define Bitmask_19 0x0007ffff
+#define Bitmask_20 0x000fffff
+#define Bitmask_21 0x001fffff
+#define Bitmask_22 0x003fffff
+#define Bitmask_23 0x007fffff
+#define Bitmask_24 0x00ffffff
+#define Bitmask_25 0x01ffffff
+#define Bitmask_26 0x03ffffff
+#define Bitmask_27 0x07ffffff
+#define Bitmask_28 0x0fffffff
+#define Bitmask_29 0x1fffffff
+#define Bitmask_30 0x3fffffff
+#define Bitmask_31 0x7fffffff
 static u8 utf8_top5b_class[32] = {
     // Maps top 5 bits of the (hopefully) first utf8 byte in
     //  codepoint sequence to the length of the utf8 codepoint.

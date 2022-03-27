@@ -74,8 +74,8 @@ struct Ui_State
 static D3d11_State d3_state;
 static Ui_State ui_state;
 
-#define TEXTURE_WIDTH  (2048*5)
-#define TEXTURE_HEIGHT (512)
+#define TEXTURE_WIDTH  (2048*4)
+#define TEXTURE_HEIGHT (256)
 
 
 
@@ -385,8 +385,10 @@ static void initialize_d3d11_graphics(HWND window)
 
 static void d3d11_update_glyph_texture(u32 tex_x, u32 tex_y,
                                        u32 image_width, u32 image_height,
-                                       u8 *image_memory)
+                                       u32 image_pitch, u8 *image_memory)
 {
+    assert(image_width && image_height);
+    
     D3D11_BOX update_box = {};
     update_box.back = 1;
     
@@ -397,8 +399,8 @@ static void d3d11_update_glyph_texture(u32 tex_x, u32 tex_y,
     assert(update_box.right <= TEXTURE_WIDTH && update_box.bottom <= TEXTURE_HEIGHT);
     
     d3_state.device_context->UpdateSubresource(d3_state.texture, 0, &update_box,
-                                               image_memory, image_width,
-                                               image_width*image_height); // @todo check if that arg can be 0?
+                                               image_memory, image_pitch,
+                                               image_pitch*image_height); // @todo check if that arg can be 0?
 }
 
 
@@ -576,7 +578,7 @@ static void render_text_input_rect(Rect rect, f32 radius, u32 rgba_inner, u32 rg
 
 
 
-static void render_glyph(f32 x, f32 y, f32 w, f32 h, f32 tex_x, f32 tex_y, u32 rgba)
+static void render_glyph_tex(f32 x, f32 y, f32 w, f32 h, f32 tex_x, f32 tex_y, u32 rgba)
 {
     push_and_fill_quad_indicies(1);
     
@@ -590,31 +592,4 @@ static void render_glyph(f32 x, f32 y, f32 w, f32 h, f32 tex_x, f32 tex_y, u32 r
     raw_f32[5] = tex_y;
     raw_u32[6] = rgba;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 

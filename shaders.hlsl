@@ -141,14 +141,14 @@ float4 ps_main(Vs_Out input) : SV_TARGET
         color = lerp(input.color1, input.color2, in_inner);
         color.a *= in_shape;
         
-        float texture_alpha = glyph_texture.Sample(glyph_sampler, (input.pixel_p.xy + anim_t*50.) * float2(0.001, 0.01)).a;
+        float texture_alpha = glyph_texture.Sample(glyph_sampler, (input.pixel_p.xy + anim_t*150.) * float2(0.0004, 0.01)).a;
         color.rgb *= (0.5f + 0.5f*texture_alpha);
     }
     else
     {
         float texture_alpha = glyph_texture.Sample(glyph_sampler, input.radius_or_uv).a;
         color = input.color2;
-        color *= texture_alpha;
+        color.a *= texture_alpha;
     }
     
     return color;

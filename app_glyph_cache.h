@@ -1,4 +1,4 @@
-enum Glyph_Status
+enum Glyph_Status : u8
 {
     Glyph_Empty,
     Glyph_Invalid,
@@ -14,6 +14,7 @@ struct Glyph
     s16 offset_x, offset_y;
     f32 advance;
     Glyph_Status status;
+    u8 additional_segment_count;
     
     // The hash is equal to the codepoint value of the glyph.
     // This means that we do not support glyphs that are produced out of multiple connected codepoints.
@@ -27,9 +28,9 @@ struct Glyph
     u16 prev_in_lru;
 };
 
-#define Font_AsciiBlockStart (' ')
-#define FontAsciiBlockLast ('~')
-#define Font_AsciiBlockCount (FontAsciiBlockLast - '!' + 1)
+#define Font_AsciiBlock_Start (' ')
+#define FontAsciiBlock_OnePastLast ('~')
+#define Font_AsciiBlock_Count (FontAsciiBlock_OnePastLast - Font_AsciiBlock_Start)
 
 struct Font
 {
@@ -39,10 +40,13 @@ struct Font
     f32 ascent, descent, line_gap;
     f32 space_width;
     
-    u16 max_width, max_height;
+    //u16 max_width, max_height;
+    //u16 max_ascii_width, max_ascii_height;
+    u16 max_ascii_width, max_height;
+    
     u16 tex_x, tex_y;
     
-    Glyph ascii_block[Font_AsciiBlockCount];
+    Glyph ascii_block[Font_AsciiBlock_Count];
     
     u32 data_table_count;
     Glyph *data_table;
@@ -54,36 +58,57 @@ struct Font
 
 
 
-
-
-
-
 static void clear_glyph_font_data(Glyph *glyph)
 {
     glyph->width = glyph->height = 0;
     glyph->offset_x = glyph->offset_y = 0;
     glyph->advance = 0;
     glyph->status = {};
+    glyph->additional_segment_count = 0;
     glyph->hash = 0;
 }
 
-static void initialize_glyph(Glyph *glyph, Font *font, u32 codepoint,
+
+
+
+
+
+//
+// stb_truetype logic
+//
+
+static int get_stb_index_for_glyph(Font *font, u32 codepoint_hash)
+{
+    u32 codepoint = codepoint_hash & Bitmask_21;
+    stbtt_fontinfo *info = &font->stb_info;
+    return stbtt_FindGlyphIndex(info, codepoint);
+}
+
+
+static void initialize_glyph(Glyph *glyph, Font *font,
+                             u32 codepoint_hash, int stb_glyph_index,
                              b32 increment_texture_position = false)
 {
     clear_glyph_font_data(glyph);
-    glyph->hash = codepoint;
+    glyph->hash = codepoint_hash;
+    
+    u32 codepoint = codepoint_hash & Bitmask_21;
+    u32 horizontal_shift = codepoint_hash >> 21;
     
     // @todo Use this: stbtt_MakeCodepointBitmap() -- renders into bitmap provided by the user
     // Currently it uses malloc inside stb_truetype.h
     stbtt_fontinfo *info = &font->stb_info;
+    if (stb_glyph_index <= 0) {
+        stb_glyph_index = get_stb_index_for_glyph(font, codepoint_hash);
+    }
     
-    int glyph_index = stbtt_FindGlyphIndex(info, codepoint);
-    if (glyph_index > 0)
+    
+    if (stb_glyph_index > 0)
     {
         s32 width, height, offset_x, offset_y;
         u8 *mono_bitmap = stbtt_GetGlyphBitmapSubpixel(info, 0, font->font_scale,
                                                        0.f, 0.f, // subpixel position
-                                                       glyph_index,
+                                                       stb_glyph_index,
                                                        &width, &height, &offset_x, &offset_y);
         
         glyph->offset_x = (s16)offset_x;
@@ -96,20 +121,31 @@ static void initialize_glyph(Glyph *glyph, Font *font, u32 codepoint,
         glyph->advance = (f32)advance * font->font_scale;
         
         
-        if (mono_bitmap &&
-            (width > 0 && width < font->max_width &&
-             height > 0 && height < font->max_height))
+        if (mono_bitmap && width > 0 &&
+            height > 0 && height < font->max_height)
         {
             glyph->status = Glyph_Loaded;
+            s32 pitch = width;
+            u8 *bitmap = mono_bitmap;
             
             if (increment_texture_position)
             {
                 glyph->tex_x = font->tex_x;
                 glyph->tex_y = font->tex_y;
-                font->tex_x += (u16)width + 1;
+                font->tex_x += (u16)width;
+            }
+            else
+            {
+                glyph->additional_segment_count = (u8)((glyph->width + font->max_ascii_width - 1) / font->max_ascii_width) - 1;
+                
+                u32 width_left = (width - font->max_ascii_width*horizontal_shift);
+                glyph->width = (u16)get_min(width_left, font->max_ascii_width);
+                
+                u32 horizontal_offset = font->max_ascii_width * horizontal_shift;
+                bitmap += horizontal_offset;
             }
             
-            d3d11_update_glyph_texture(glyph->tex_x, glyph->tex_y, width, height, mono_bitmap);
+            d3d11_update_glyph_texture(glyph->tex_x, glyph->tex_y, glyph->width, height, pitch, bitmap);
         }
         else if (glyph->advance != 0)
         {
@@ -118,6 +154,7 @@ static void initialize_glyph(Glyph *glyph, Font *font, u32 codepoint,
         else
         {
             glyph->status = Glyph_Invalid;
+            assert(0);
         }
         
         
@@ -161,7 +198,7 @@ static void initialize_font(Font *font, char *font_file_data, f32 pixel_scale)
                 f32 bounding_height = (y1 - y0) * font->font_scale;
                 assert(bounding_width > 0.f && bounding_height > 0);
                 
-                font->max_width = (u16)get_max(1.f, ceilf(bounding_width) + 1);
+                //font->max_width = (u16)get_max(1.f, ceilf(bounding_width) + 1); @delete
                 font->max_height = (u16)get_max(1.f, ceilf(bounding_height) + 1);
             }
             
@@ -183,8 +220,14 @@ static void initialize_font(Font *font, char *font_file_data, f32 pixel_scale)
                  ascii_index < array_count(font->ascii_block);
                  ascii_index += 1)
             {
-                initialize_glyph(font->ascii_block + ascii_index, font,
-                                 Font_AsciiBlockStart + ascii_index, true);
+                Glyph *glyph = font->ascii_block + ascii_index;
+                initialize_glyph(glyph, font,
+                                 Font_AsciiBlock_Start + ascii_index,
+                                 0, true);
+                
+                if (glyph->width > font->max_ascii_width) {
+                    font->max_ascii_width = glyph->width;
+                }
             }
         }
     }
@@ -194,7 +237,7 @@ static void initialize_font(Font *font, char *font_file_data, f32 pixel_scale)
     if (ok)
     {
         s32 texture_width_left = (TEXTURE_WIDTH - font->tex_x);
-        s32 dynamic_glyph_slots = texture_width_left / font->max_width;
+        s32 dynamic_glyph_slots = texture_width_left / font->max_ascii_width;
         
         if (dynamic_glyph_slots > 0)
         {
@@ -223,7 +266,7 @@ static void initialize_font(Font *font, char *font_file_data, f32 pixel_scale)
                 {
                     glyph->tex_x = font->tex_x;
                     glyph->tex_y = font->tex_y;
-                    font->tex_x += font->max_width;
+                    font->tex_x += font->max_ascii_width;
                     assert(font->tex_x <= TEXTURE_WIDTH);
                 }
             }
@@ -244,6 +287,19 @@ static void initialize_font(Font *font, char *font_file_data, f32 pixel_scale)
 }
 
 
+
+
+
+
+
+
+
+
+
+
+//
+// Glyph cache logic
+//
 
 static Glyph *get_free_glyph_slot(Font *font)
 {
@@ -278,6 +334,10 @@ static Glyph *get_free_glyph_slot(Font *font)
     return glyph_oldest;
 }
 
+
+
+
+
 static u16 get_data_index_from_glyph_pointer(Font *font, Glyph *glyph)
 {
     assert((u64)glyph >= (u64)font->data_table);
@@ -287,22 +347,23 @@ static u16 get_data_index_from_glyph_pointer(Font *font, Glyph *glyph)
     return result;
 }
 
-static Glyph get_glyph(Font *font, u32 codepoint)
+
+
+static Glyph get_glyph(Font *font, u32 codepoint_hash)
 {
-    if (codepoint >= Font_AsciiBlockStart &&
-        codepoint < FontAsciiBlockLast)
+    if (codepoint_hash >= Font_AsciiBlock_Start &&
+        codepoint_hash < FontAsciiBlock_OnePastLast)
     {
-        u32 glyph_index = codepoint - Font_AsciiBlockStart;
+        u32 glyph_index = codepoint_hash - Font_AsciiBlock_Start;
         return font->ascii_block[glyph_index];
     }
     
-    u32 hash = codepoint;
-    u32 key = 1 + (hash & font->hash_table_key_mask);
+    u32 key = 1 + (codepoint_hash & font->hash_table_key_mask);
     
     Glyph *glyph = font->data_table + font->hash_table[key];
     for (;;)
     {
-        if (glyph->hash == hash) {
+        if (glyph->hash == codepoint_hash) {
             break;
         }
         if (!glyph->next_in_collision) {
@@ -315,15 +376,26 @@ static Glyph get_glyph(Font *font, u32 codepoint)
     
     if (!glyph)
     {
-        glyph = get_free_glyph_slot(font);
-        initialize_glyph(glyph, font, codepoint);
+        int stb_glyph_index = get_stb_index_for_glyph(font, codepoint_hash);
         
-        glyph->next_in_collision = font->hash_table[key];
-        font->hash_table[key] = get_data_index_from_glyph_pointer(font, glyph);
+        if (stb_glyph_index > 0)
+        {
+            glyph = get_free_glyph_slot(font);
+            initialize_glyph(glyph, font, codepoint_hash, stb_glyph_index);
+            
+            glyph->next_in_collision = font->hash_table[key];
+            font->hash_table[key] = get_data_index_from_glyph_pointer(font, glyph);
+        }
+        else
+        {
+            Glyph result = {};
+            result.status = Glyph_Invalid;
+            return result;
+        }
     }
     
     
-    // update position in RLU
+    // update position in LRU
     {
         Glyph *next = font->data_table + glyph->next_in_lru;
         Glyph *prev = font->data_table + glyph->prev_in_lru;
@@ -340,4 +412,3 @@ static Glyph get_glyph(Font *font, u32 codepoint)
     
     return *glyph;
 }
-

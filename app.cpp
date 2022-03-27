@@ -1,7 +1,7 @@
 /*
-[ ] mouse support?
-[ ] better dynamic glyph cache - more conservative space usage needed
 [ ] avoid scanning the whole text input if it isn't dirty (should be easy)
+
+[ ] dynamically estimate required texture size for a set of fonts?
 
 [ ] support copy/paste?
 
@@ -220,6 +220,74 @@ static LRESULT window_procedure(HWND window, UINT message, WPARAM wParam, LPARAM
 
 
 
+static f32 draw_glyph(Font *font, u32 codepoint, f32 x, f32 y, u32 rgba)
+{
+    Glyph first_glyph = get_glyph(font, codepoint);
+    
+    if (first_glyph.status == Glyph_Invalid)
+    {
+        // You can do something more fancy for missing codepoints here
+        // But I feel like it should be more application specific.
+        // You might want to use smaller font to draw codepoint code like: U+1234
+        // Or you can to draw a fancy rectangle or a valve-style-checkerboard
+        rgba ^= Bitmask_24;
+        codepoint = '?';
+        first_glyph = get_glyph(font, codepoint);
+    }
+    
+    
+    Glyph glyph = first_glyph;
+    x = roundf(x + (f32)glyph.offset_x);
+    y = roundf(y + (f32)glyph.offset_y);
+    
+    for (s32 index = 0;;)
+    {
+#if 0
+        s32 ii = index + 1;
+        rgba = (255 << 24 |
+                ii*32 << 16 |
+                ii*32 << 8 |
+                ii*32 << 0);
+#endif
+        
+        f32 w = (f32)glyph.width;
+        
+        push_and_fill_quad_indicies(1);
+        u32 *raw_u32 = push_raw(7);
+        f32 *raw_f32 = (f32 *)raw_u32;
+        raw_f32[0] = x;
+        raw_f32[1] = y;
+        raw_f32[2] = w;
+        raw_f32[3] = (f32)glyph.height;
+        raw_f32[4] = (f32)glyph.tex_x;
+        raw_f32[5] = (f32)glyph.tex_y;
+        raw_u32[6] = rgba;
+        
+        
+        
+        index += 1;
+        if (index <= (s32)first_glyph.additional_segment_count)
+        {
+            x += w;
+            glyph = get_glyph(font, codepoint | (index << 21));
+            
+            if (glyph.status != Glyph_Loaded)
+            {
+                assert(0);
+                break;
+            }
+        }
+        else
+        {
+            break;
+        }
+    }
+    
+    return first_glyph.advance;
+}
+
+
+
 
 static void draw_text_input_inner(Text_Input *text, Font *font,
                                   Rect text_rect, f32 padding_x, f32 padding_y,
@@ -336,102 +404,38 @@ static void draw_text_input_inner(Text_Input *text, Font *font,
     
     
     
+    
     update_cursor();
     
     
     
-    u8 invalid_memory[7];
-    u64 invalid_glyph_length = 0;
-    String invalid_glyph = {};
-    
-    while (text_string.size || invalid_glyph.size)
+    while (text_string.size)
     {
         Glyph glyph = {};
         u32 consume_inc = 0;
         u32 glyph_color = 0xff000513;
         
-        if (!invalid_glyph.size)
-        {
-            Unicode_Consume consume = utf8_consume(text_string);
-            consume_inc = consume.inc;
-            
-            text_string = str_skip(text_string, consume.inc);
-            glyph = get_glyph(font, consume.codepoint);
-            
-            
-            if (glyph.status == Glyph_Invalid)
-            {
-                u32 codepoint = consume.codepoint;
-                invalid_memory[0] = '\\';
-                u32 invalid_index = 1;
-                
-                do
-                {
-                    if (invalid_index >= array_count(invalid_memory))
-                    {
-                        invalid_memory[1] = '?';
-                        invalid_index = 2;
-                        break;
-                    }
-                    
-                    u32 value = codepoint & 0xF;
-                    codepoint /= 0xF;
-                    
-                    u8 character = 0;
-                    if (value >= 10) {
-                        character = (u8)((value - 10) + 'A');
-                    } else {
-                        character = (u8)(value + '0');
-                    }
-                    
-                    invalid_memory[invalid_index++] = character;
-                } while (codepoint > 0);
-                
-                invalid_glyph.str = invalid_memory;
-                invalid_glyph.size = invalid_index;
-                invalid_glyph_length = invalid_index;
-                assert(invalid_glyph.size <= array_count(invalid_memory));
-            }
-        }
+        Unicode_Consume consume = utf8_consume(text_string);
+        consume_inc = consume.inc;
         
-        if (invalid_glyph.size)
-        {
-            glyph = get_glyph(font, invalid_glyph.str[0]);
-            invalid_glyph = str_skip(invalid_glyph, 1);
-            glyph_color = 0xff430043;
-        }
-        
+        text_string = str_skip(text_string, consume.inc);
+        f32 glyph_advance = 0.f;
         
         if (!update_scroll_x_and_skip_drawing)
         {
-            if (glyph.status == Glyph_Loaded)
-            {
-                f32 x = pos_x + (f32)glyph.offset_x;
-                f32 y = base_y + (f32)glyph.offset_y;
-                f32 w = (f32)glyph.width;
-                f32 h = (f32)glyph.height;
-                f32 tex_x = (f32)glyph.tex_x;
-                f32 tex_y = (f32)glyph.tex_y;
-                
-                if (x < text_x1 &&
-                    x + w > text_rect.x)
-                {
-                    render_glyph(x, y, w, h, tex_x, tex_y, glyph_color);
-                }
-            }
+            glyph_advance = draw_glyph(font, consume.codepoint, pos_x, base_y, glyph_color);
+        }
+        else
+        {
+            glyph_advance = get_glyph(font, consume.codepoint).advance;
         }
         
-        
-        pos_x += (f32)glyph.advance;
+        pos_x += glyph_advance;
         byte_index += consume_inc;
         
-        
-        if (!invalid_glyph.size ||
-            invalid_glyph.size == invalid_glyph_length)
-        {
-            update_cursor();
-        }
+        update_cursor();
     }
+    
     
     
     
@@ -538,7 +542,7 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
         auto courier = L"C:\\Windows\\Fonts\\cour.ttf";
         auto alger = L"C:\\Windows\\Fonts\\alger.ttf"; // doesn't have Polish letters
             
-        HANDLE font_file = CreateFileW(courier, GENERIC_READ,
+        HANDLE font_file = CreateFileW(times, GENERIC_READ,
                                        FILE_SHARE_DELETE|FILE_SHARE_READ|FILE_SHARE_WRITE, nullptr,
                                        OPEN_EXISTING, 0, nullptr);
         assert_and_throw_message(font_file != INVALID_HANDLE_VALUE, "Failed to open arial.ttf");
