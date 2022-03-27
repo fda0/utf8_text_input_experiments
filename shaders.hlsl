@@ -14,12 +14,13 @@ struct Vs_In
 struct Vs_Out
 {
     float4 pixel_p : SV_POSITION;
-    float2 radius_or_uv : RADIUS_OR_UV;
+    float2 tex_uv : TEX_UV; // reused as .x = radius, .y = border
     
     nointerpolation float4 color1       : COLOR1;
     nointerpolation float4 color2       : COLOR2;
     nointerpolation float2 center_p     : CENTER_POS;
     nointerpolation float2 half_dim     : HALF_DIM;
+    nointerpolation float radius        : RADIUS;
     nointerpolation uint type           : TYPE;
 };
 
@@ -33,12 +34,6 @@ float sdf_rect(float2 pixel_p, float2 origin_p, float2 dim, float radius)
     return length(max(delta, 0.)) + min(max(delta.x, delta.y), 0.0) - radius;
 }
 
-float sdf_circle(float2 pixel_p, float2 origin_p, float radius)
-{
-    float2 pos = pixel_p - origin_p;
-    return length(pos) - radius;
-}
-
 float4 decode_rgba(uint rgba)
 {
     float4 color;
@@ -50,6 +45,8 @@ float4 decode_rgba(uint rgba)
 }
 
 
+
+
 Vs_Out vs_main(Vs_In input)
 {
     Vs_Out output;
@@ -58,13 +55,17 @@ Vs_Out vs_main(Vs_In input)
     uint xy_corner = input.vertex_id >> 30;
     output.type = (input.vertex_id >> 24) & 0x3F; // 6 bits
     
+    uint clip_rect_address = raw_buffer.Load(base_address);
+    
+    
+    // load position
     float2 origin_p;
-    origin_p.x = asfloat(raw_buffer.Load(base_address));
-    origin_p.y = asfloat(raw_buffer.Load(base_address + 4));
+    origin_p.x = asfloat(raw_buffer.Load(base_address + 4));
+    origin_p.y = asfloat(raw_buffer.Load(base_address + 8));
     
     float2 dim;
-    dim.x = asfloat(raw_buffer.Load(base_address + 8));
-    dim.y = asfloat(raw_buffer.Load(base_address + 12));
+    dim.x = asfloat(raw_buffer.Load(base_address + 12));
+    dim.y = asfloat(raw_buffer.Load(base_address + 16));
     
     output.half_dim = dim * 0.5;
     output.center_p = origin_p + output.half_dim;
@@ -72,7 +73,7 @@ Vs_Out vs_main(Vs_In input)
     
     float2 pixel_dim = output.half_dim;
     if (output.type == 0) {
-        pixel_dim += 1.;
+        pixel_dim += 1.; // add 1 pixel for sdf falloff border
     }
     
     output.pixel_p.x = output.center_p.x + (xy_corner & 1 ? pixel_dim.x : -pixel_dim.x);
@@ -81,30 +82,52 @@ Vs_Out vs_main(Vs_In input)
     output.pixel_p.w = 1.;
     
     
-    output.radius_or_uv.x = asfloat(raw_buffer.Load(base_address + 16));
     
-    if (output.type == 0)
-    {
-        uint rgba1 = raw_buffer.Load(base_address + 20);
-        output.color1 = decode_rgba(rgba1);
+    // clipping
+    float4 clip_rect = asfloat(raw_buffer.Load4(clip_rect_address));
+    float2 move_uv_by = 0.;
+    
+    if (output.pixel_p.x < clip_rect.x) { // x min
+        move_uv_by.x = clip_rect.x - output.pixel_p.x;
+        output.pixel_p.x = clip_rect.x;
     }
-    else
+    if (output.pixel_p.x > clip_rect.z) { // x max
+        dim.x -= output.pixel_p.x - clip_rect.z;
+        output.pixel_p.x = clip_rect.z;
+    }
+    if (output.pixel_p.y < clip_rect.y) { // y min
+        move_uv_by.y = clip_rect.y - output.pixel_p.y;
+        output.pixel_p.y = clip_rect.y;
+    }
+    if (output.pixel_p.y > clip_rect.w) { // y max
+        dim.y -= output.pixel_p.y - clip_rect.w;
+        output.pixel_p.y = clip_rect.w;
+    }
+    
+    
+    
+    // a little bit messy data loading for type specific thing
+    output.tex_uv = asfloat(raw_buffer.Load2(base_address + 20)); // load 20 + 24
+    output.color1 = decode_rgba(raw_buffer.Load(base_address + 28));
+    
+    if (output.type == 0) // textbox background
     {
-        output.radius_or_uv.y = asfloat(raw_buffer.Load(base_address + 20));
-        
+        output.tex_uv *= output.half_dim.y;
+        output.color2 = decode_rgba(raw_buffer.Load(base_address + 32));
+    }
+    else // textured glyph quad
+    {
         if (xy_corner & 1) {
-            output.radius_or_uv.x += dim.x;
+            output.tex_uv.x += dim.x;
         }
         if (xy_corner & 2) {
-            output.radius_or_uv.y += dim.y;
+            output.tex_uv.y += dim.y;
         }
         
-        output.radius_or_uv *= atlas_dim_inv;
+        output.tex_uv += move_uv_by;
+        output.tex_uv *= atlas_dim_inv;
     }
     
-    
-    uint rgba2 = raw_buffer.Load(base_address + 24);
-    output.color2 = decode_rgba(rgba2);
     
     
     output.pixel_p.xy *= screen_dim_inv*2.;
@@ -125,18 +148,13 @@ float4 ps_main(Vs_Out input) : SV_TARGET
     
     if (input.type == 0)
     {
-        float radius = input.radius_or_uv.x;
-#if 0
-        float dist = sdf_circle(input.pixel_p.xy, input.center_p, radius);
-#else
+        float radius = input.tex_uv.x;
+        float border = -input.tex_uv.y;
+        
         float dist = sdf_rect(input.pixel_p.xy, input.center_p, input.half_dim, radius);
-#endif
         
-        //float in_shape = smoothstep(1., 0., dist);
         float in_shape = 1. - clamp(dist, 0., 1.);
-        
-        float border = input.half_dim.x * -0.01; // @todo expose as parameter to the textbox? use half_dim.y?
-        float in_inner = smoothstep(border, border + 2., dist);
+        float in_inner = smoothstep(border - 1., border, dist);
         
         color = lerp(input.color1, input.color2, in_inner);
         color.a *= in_shape;
@@ -146,8 +164,8 @@ float4 ps_main(Vs_Out input) : SV_TARGET
     }
     else
     {
-        float texture_alpha = glyph_texture.Sample(glyph_sampler, input.radius_or_uv).a;
-        color = input.color2;
+        float texture_alpha = glyph_texture.Sample(glyph_sampler, input.tex_uv).a;
+        color = input.color1;
         color.a *= texture_alpha;
     }
     

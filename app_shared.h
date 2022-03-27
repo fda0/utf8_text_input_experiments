@@ -45,6 +45,14 @@ static b32 v2_in_rect(Rect rect, v2 vec)
             vec.y >= rect.y && vec.y < rect.y + rect.h);
 }
 
+static Rect rect_contract(Rect rect, f32 contract)
+{
+    rect.x += contract;
+    rect.y += contract;
+    rect.w -= contract*2.f;
+    rect.h -= contract*2.f;
+    return rect;
+}
 
 
 

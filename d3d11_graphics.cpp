@@ -55,6 +55,7 @@ struct Ui_State
     // this could be made to grow dynamicly with VirtualAlloc
     u32 raw_data[1024*1024*2];
     u32 raw_count;
+    u32 active_clip_address;
     
     // layers used for covinient UI Z-ordering
 #define Indicies_LayersCount (2) // can be eaisly extended
@@ -511,13 +512,6 @@ static void d3d11_render()
 //
 // Draw
 //
-static void clear_ui_state()
-{
-    ui_state.raw_count = 0;
-    memset(ui_state.indicies_counts, 0, sizeof(ui_state.indicies_counts));
-    ui_state.layer = 0;
-}
-
 
 static u32 *push_indicies(u32 count)
 {
@@ -546,7 +540,7 @@ static u32 *push_and_fill_quad_indicies(u32 type)
     return indicies;
 }
 
-static u32 *push_raw(u32 count)
+static u32 *push_raw_data(u32 count)
 {
     u32 *raw_u32 = ui_state.raw_data + ui_state.raw_count;
     f32 *raw_f32 = (f32 *)raw_u32;
@@ -556,40 +550,59 @@ static u32 *push_raw(u32 count)
 }
 
 
-static void render_text_input_rect(f32 x, f32 y, f32 w, f32 h, f32 radius, u32 rgba_inner, u32 rgba_border)
+
+
+
+static void render_text_input_rect(f32 x, f32 y, f32 w, f32 h,
+                                   f32 radius, f32 border,
+                                   u32 rgba_inner, u32 rgba_border)
 {
     push_and_fill_quad_indicies(0);
     
-    u32 *raw_u32 = push_raw(7);
+    u32 *raw_u32 = push_raw_data(9);
     f32 *raw_f32 = (f32 *)raw_u32;
-    raw_f32[0] = x;
-    raw_f32[1] = y;
-    raw_f32[2] = w;
-    raw_f32[3] = h;
-    raw_f32[4] = radius;
-    raw_u32[5] = rgba_inner;
-    raw_u32[6] = rgba_border;
+    raw_u32[0] = ui_state.active_clip_address;
+    raw_f32[1] = x;
+    raw_f32[2] = y;
+    raw_f32[3] = w;
+    raw_f32[4] = h;
+    raw_f32[5] = radius;
+    raw_f32[6] = border;
+    raw_u32[7] = rgba_inner;
+    raw_u32[8] = rgba_border;
 }
 
-static void render_text_input_rect(Rect rect, f32 radius, u32 rgba_inner, u32 rgba_border)
+static void render_text_input_rect(Rect rect, f32 radius, f32 border,
+                                   u32 rgba_inner, u32 rgba_border)
 {
-    render_text_input_rect(rect.x, rect.y, rect.w, rect.h, radius, rgba_inner, rgba_border);
+    render_text_input_rect(rect.x, rect.y, rect.w, rect.h, radius, border, rgba_inner, rgba_border);
 }
 
 
 
-static void render_glyph_tex(f32 x, f32 y, f32 w, f32 h, f32 tex_x, f32 tex_y, u32 rgba)
+static void set_clip_rect(Rect rect)
 {
-    push_and_fill_quad_indicies(1);
+    u32 *raw_u32 = push_raw_data(4);
+    f32 *raw_f32 = (f32 *)raw_u32;
+    raw_f32[0] = rect.x;
+    raw_f32[1] = rect.y;
+    raw_f32[2] = rect.x + rect.w;
+    raw_f32[3] = rect.y + rect.h;
     
-    u32 *raw_u32 = push_raw(7);
-    f32 *raw_f32 = (f32 *)raw_u32;
-    raw_f32[0] = roundf(x);
-    raw_f32[1] = roundf(y);
-    raw_f32[2] = w;
-    raw_f32[3] = h;
-    raw_f32[4] = tex_x;
-    raw_f32[5] = tex_y;
-    raw_u32[6] = rgba;
+    ui_state.active_clip_address = (u32)((u64)raw_u32 - (u64)ui_state.raw_data);
+}
+
+static void reset_clip_rect()
+{
+    ui_state.active_clip_address = 0;
+}
+
+
+static void start_frame_for_ui_state()
+{
+    ui_state.raw_count = 0;
+    memset(ui_state.indicies_counts, 0, sizeof(ui_state.indicies_counts));
+    ui_state.layer = 0;
+    set_clip_rect({0, 0, (3.402823466e+38f), (3.402823466e+38f)}); // default clip rect
 }
 

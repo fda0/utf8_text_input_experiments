@@ -1,11 +1,11 @@
 /*
 [ ] avoid scanning the whole text input if it isn't dirty (should be easy)
-
 [ ] dynamically estimate required texture size for a set of fonts?
+
+[ ] add more textboxes to this demo program
 
 [ ] support copy/paste?
 
-[ ] d3d11 clipping in shader
 [ ] d3d11 support framebuffer resize
 
 [ ] use Rect / V2 types to simplify api?
@@ -52,6 +52,7 @@ struct Input_Event
     u8 vk_code; // is equal to zero if str is filled
     u8 shift : 1;
     u8 control : 1;
+    u8 alt : 1;
     u8 released : 1;
     char cstr[4]; // single codepoint encoded in utf8 - zero terminated if it's less than 4 bytes
 };
@@ -151,6 +152,7 @@ static LRESULT window_procedure(HWND window, UINT message, WPARAM wParam, LPARAM
                 event->vk_code = (u8)wParam;
                 event->shift = !!(GetKeyState(VK_SHIFT) & (1 << 15));
                 event->control = !!(GetKeyState(VK_CONTROL) & (1 << 15));
+                event->alt = !!(lParam & (1 << 29));
             }
         } break;
         
@@ -186,22 +188,19 @@ static LRESULT window_procedure(HWND window, UINT message, WPARAM wParam, LPARAM
             if (wide_char_count &&
                 app_state.input_event_count < array_count(app_state.input_events))
             {
-                Input_Event *event = &app_state.input_events[app_state.input_event_count++];
-                *event = {};
-                event->shift = !!(GetKeyState(VK_SHIFT) & (1 << 15));
-                event->control = !!(GetKeyState(VK_CONTROL) & (1 << 15));
-                
-                s32 count = WideCharToMultiByte(CP_UTF8, 0,
-                                                wide_chars, wide_char_count,
-                                                event->cstr, array_count(event->cstr),
-                                                nullptr, false);
-                
-                Unicode_Consume consume = utf8_consume((u8*)event->cstr, count);
-                if (!count || consume.codepoint < ' ' || consume.codepoint == 0x7F)
+                // Filter out garbage characters that get sent when you press Control + some key
+                // (You might want to make an exception for a new line character)
+                if (!(wide_char_count == 1 && wide_chars[0] < ' ' || wide_chars[0] == 0x7F))
                 {
-                    // Filter out garbage characters that get sent when you press Control + some key
-                    // (You might want to make an exception for a new line character)
-                    app_state.input_event_count -= 1;
+                    Input_Event *event = &app_state.input_events[app_state.input_event_count++];
+                    *event = {};
+                    event->shift = !!(GetKeyState(VK_SHIFT) & (1 << 15));
+                    event->control = !!(GetKeyState(VK_CONTROL) & (1 << 15));
+                    
+                    s32 count = WideCharToMultiByte(CP_UTF8, 0,
+                                                    wide_chars, wide_char_count,
+                                                    event->cstr, array_count(event->cstr),
+                                                    nullptr, false);
                 }
             }
         } break;
@@ -220,7 +219,7 @@ static LRESULT window_procedure(HWND window, UINT message, WPARAM wParam, LPARAM
 
 
 
-static f32 draw_glyph(Font *font, u32 codepoint, f32 x, f32 y, u32 rgba)
+static f32 render_codepoint(Font *font, u32 codepoint, f32 x, f32 y, u32 rgba)
 {
     Glyph first_glyph = get_glyph(font, codepoint);
     
@@ -242,7 +241,7 @@ static f32 draw_glyph(Font *font, u32 codepoint, f32 x, f32 y, u32 rgba)
     
     for (s32 index = 0;;)
     {
-#if 0
+#if 0 // debug code for coloring glyph segments
         s32 ii = index + 1;
         rgba = (255 << 24 |
                 ii*32 << 16 |
@@ -250,25 +249,24 @@ static f32 draw_glyph(Font *font, u32 codepoint, f32 x, f32 y, u32 rgba)
                 ii*32 << 0);
 #endif
         
-        f32 w = (f32)glyph.width;
-        
         push_and_fill_quad_indicies(1);
-        u32 *raw_u32 = push_raw(7);
-        f32 *raw_f32 = (f32 *)raw_u32;
-        raw_f32[0] = x;
-        raw_f32[1] = y;
-        raw_f32[2] = w;
-        raw_f32[3] = (f32)glyph.height;
-        raw_f32[4] = (f32)glyph.tex_x;
-        raw_f32[5] = (f32)glyph.tex_y;
-        raw_u32[6] = rgba;
         
+        u32 *raw_u32 = push_raw_data(8);
+        f32 *raw_f32 = (f32 *)raw_u32;
+        raw_u32[0] = ui_state.active_clip_address;
+        raw_f32[1] = x;
+        raw_f32[2] = y;
+        raw_f32[3] = (f32)glyph.width;
+        raw_f32[4] = (f32)glyph.height;
+        raw_f32[5] = (f32)glyph.tex_x;
+        raw_f32[6] = (f32)glyph.tex_y;
+        raw_u32[7] = rgba;
         
         
         index += 1;
         if (index <= (s32)first_glyph.additional_segment_count)
         {
-            x += w;
+            x += (f32)glyph.width;
             glyph = get_glyph(font, codepoint | (index << 21));
             
             if (glyph.status != Glyph_Loaded)
@@ -331,8 +329,13 @@ static void draw_text_input_inner(Text_Input *text, Font *font,
     if (!update_scroll_x_and_skip_drawing)
     {
         ui_state.layer = 0;
-        render_text_input_rect(text_rect, 5.f + text_rect.h*0.1f, 0xff11aaff, 0xff001122);
+        f32 border_share = 0.1f;
+        render_text_input_rect(text_rect, 0.2f, border_share, 0xff11aaff, 0xff001122);
         ui_state.layer = 1;
+        
+        f32 border = border_share*text_rect.h*0.5f;
+        Rect text_rect_minus_border = rect_contract(text_rect, border);
+        set_clip_rect(text_rect_minus_border);
     }
     
     
@@ -370,7 +373,7 @@ static void draw_text_input_inner(Text_Input *text, Font *font,
             {
                 render_text_input_rect(pos_x, cursor_y0,
                                        cursor_w, cursor_h, 
-                                       2.f, 0xffff'ffff, 0xffff'ffff);
+                                       0.05f, 0.f, 0xffff'ffff, 0xffff'ffff);
             }
         }
         else
@@ -423,7 +426,7 @@ static void draw_text_input_inner(Text_Input *text, Font *font,
         
         if (!update_scroll_x_and_skip_drawing)
         {
-            glyph_advance = draw_glyph(font, consume.codepoint, pos_x, base_y, glyph_color);
+            glyph_advance = render_codepoint(font, consume.codepoint, pos_x, base_y, glyph_color);
         }
         else
         {
@@ -444,10 +447,14 @@ static void draw_text_input_inner(Text_Input *text, Font *font,
         ui_state.layer = 0;
         if (selection_min != selection_max)
         {
+            f32 selection_width = selection_max - selection_min + cursor_w;
+            
             render_text_input_rect(selection_min, cursor_y0,
-                                   selection_max - selection_min + cursor_w, cursor_h,
-                                   2.f, 0xff0000ff, 0xff000099);
+                                   selection_width, cursor_h,
+                                   0.05f, 0.05f, 0xff0000ff, 0xff000066);
         }
+        
+        reset_clip_rect();
     }
     else
     {
@@ -584,7 +591,7 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
     for(;;)
     {
         frame_number += 1;
-        clear_ui_state();
+        start_frame_for_ui_state();
         app_state.input_event_count = 0;
         app_state.left_mouse_down_first_frame = false;
         
@@ -669,8 +676,11 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
                 case VK_BACK:
                 case VK_DELETE: {
                     s64 dir = (event.vk_code == VK_BACK ? -1 : 1);
+                    u32 flags = TextInputMove_Select;
+                    if (event.control) { flags |= TextInputMove_ByWords; }
+                    
                     if (!text_input_has_selection(&text_input)) {
-                        text_input_move_cursor(&text_input, dir, TextInputMove_Select);
+                        text_input_move_cursor(&text_input, dir, flags);
                     }
                     text_input_write(&text_input, ""_f0);
                 } break;
@@ -699,6 +709,14 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
                         app_state.ui_active = nullptr;
                     }
                 } break;
+                
+                case 'A': {
+                    if (event.control && !event.alt)
+                    {
+                        text_input_move_cursor(&text_input, -1, TextInputMove_ByMax);
+                        text_input_move_cursor(&text_input, 1, TextInputMove_ByMax | TextInputMove_Select);
+                    }
+                } break;
             }
         }
         
@@ -709,6 +727,7 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
         
         
         draw_text_input(&text_input, font, text_input_rect, text_padding_x, text_padding_y);
+        
         
         
         d3d11_render();
